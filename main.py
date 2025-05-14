@@ -23,51 +23,81 @@ class_names = []
 class_line_no = {}
 class_func_map = {}
 
-class CallVisitor(ast.NodeVisitor):
+class Analyzer(ast.NodeVisitor):
     def __init__(self):
-        self.current_function = None
-
-    def visit_FunctionDef(self, node):
-        self.current_function = node.name
-        function_names.append(node.name)
-        function_line_no[node.name] = node.lineno
-        self.generic_visit(node)
-
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Name) and self.current_function:
-            calls.append((self.current_function, node.func.id))
-        self.generic_visit(node)
-
-class ClassAndFuncVisitor(ast.NodeVisitor):
-    def __init__(self):
-        self.current_class = None
+        self.class_stack = []
+        self.function_names = []
+        self.class_func_map = {}
+        self.calls = []
+        self.super_calls = []
+        self.function_line_no = {}
 
     def visit_ClassDef(self, node):
-        class_names.append(node.name)
-        class_line_no[node.name] = node.lineno
-        class_func_map[node.name] = []
-        self.current_class = node.name
+        class_name = node.name
+        self.class_stack.append(class_name)
+        self.class_func_map[class_name] = []
         self.generic_visit(node)
-        self.current_class = None
+        self.class_stack.pop()
 
     def visit_FunctionDef(self, node):
-        # Functions inside a class
-        function_names.append(node.name)
-        function_line_no[node.name] = node.lineno
-        if self.current_class:
-            class_func_map[self.current_class].append(node.name)
-        self.generic_visit(node)
+        if self.class_stack:
+            full_name = f"{self.class_stack[-1]}.{node.name}"
+            self.class_func_map[self.class_stack[-1]].append(full_name)
+        else:
+            full_name = node.name
 
+        if full_name not in self.function_names:
+            self.function_names.append(full_name)
+            self.function_line_no[full_name] = node.lineno
+
+        self.current_function = full_name
+        self.generic_visit(node)
+        self.current_function = None
+
+    def visit_Call(self, node):
+        if not hasattr(self, "current_function") or self.current_function is None:
+            return
+
+        if isinstance(node.func, ast.Name):
+            callee = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            if (
+                isinstance(node.func.value, ast.Call)
+                and isinstance(node.func.value.func, ast.Name)
+                and node.func.value.func.id == "super"
+            ):
+                callee = node.func.attr
+                self.calls.append((self.current_function, callee))
+                self.super_calls.append((self.current_function, callee))
+                return
+            else:
+                callee = node.func.attr
+        else:
+            return
+
+        self.calls.append((self.current_function, callee))
+        self.generic_visit(node)
 # Run the visitors
-CallVisitor().visit(tree)
-ClassAndFuncVisitor().visit(tree)
+analyzer = Analyzer()
+analyzer.visit(tree)
+
+function_names = analyzer.function_names
+class_func_map = analyzer.class_func_map
+function_line_no = analyzer.function_line_no
+calls = analyzer.calls
+super_calls = analyzer.super_calls
+
 
 # Filter out self-calls and calls to non-existing functions
-filtered_calls = [
-    (caller, callee)
-    for caller, callee in calls
-    if caller != callee and callee in function_names
-]
+filtered_calls = []
+for caller, callee in calls:
+    if caller == callee:
+        continue
+    for fn in function_names:
+        if fn.endswith(f".{callee}") or fn == callee:
+            filtered_calls.append((caller, fn))
+            break
+
 
 # === Build the graph with Pyvis ===
 net = Network(height="600px", width="900px", directed=True, bgcolor="#ffffff")
@@ -110,7 +140,7 @@ GLOBAL_NODE_STYLE = dict(
 )
 
 # Add nodes for classes
-for cls in class_names:
+for cls in class_func_map.keys():
     net.add_node(
         n_id=f"class::{cls}",
         label=cls,
@@ -143,7 +173,11 @@ for fn in function_names:
 
 # Edges for function calls
 for caller, callee in filtered_calls:
-    net.add_edge(caller, callee, color="gray", arrows="to", width=1)
+    if (caller, callee.split(".")[-1]) in super_calls:
+        net.add_edge(caller, callee, color="#0077ff", arrows="to", width=2, dashes=True)
+    else:
+        net.add_edge(caller, callee, color="gray", arrows="to", width=1)
+
 
 # Layout options (hierarchical)
 net.set_options("""
@@ -277,6 +311,24 @@ LEGEND_HTML = '''
   <div class="legend-row">
     <span class="legend-icon legend-global"></span>
     <span>Global (purple circle)</span>
+  </div>
+  <hr style="margin: 12px 0;">
+  <div class="legend-title">Edges</div>
+  <div class="legend-row">
+    <svg width="30" height="12" style="margin-right:12px"><line x1="0" y1="6" x2="30" y2="6" stroke="#1e3a5c" stroke-width="3"/></svg>
+    <span>Class → Function (Belongs to)</span>
+  </div>
+  <div class="legend-row">
+    <svg width="30" height="12" style="margin-right:12px"><line x1="0" y1="6" x2="30" y2="6" stroke="gray" stroke-width="1"/></svg>
+    <span>Function → Function (Call)</span>
+  </div>
+  <div class="legend-row">
+    <svg width="30" height="12" style="margin-right:12px"><line x1="0" y1="6" x2="30" y2="6" stroke="#0077ff" stroke-width="2" stroke-dasharray="5,4"/></svg>
+    <span>super() Call</span>
+  </div>
+  <div class="legend-row">
+    <svg width="30" height="12" style="margin-right:12px"><line x1="0" y1="6" x2="30" y2="6" stroke="#6e44ff" stroke-width="2"/></svg>
+    <span>Global → Function</span>
   </div>
 </div>
 '''
