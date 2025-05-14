@@ -299,7 +299,7 @@ body {
 
 LEGEND_HTML = '''
 <div id="legend">
-  <div class="legend-title">Legend</div>
+  <div class="legend-title">Nodes</div>
   <div class="legend-row">
     <span class="legend-icon legend-class"></span>
     <span>Class (dark square)</span>
